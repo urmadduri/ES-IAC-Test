@@ -1,0 +1,116 @@
+name: Automatic deployment to DEV
+env:
+  NODE_VERSION: '20.10.0'
+  AZURE_WEBAPP_PACKAGE_PATH: './dist/apps/wms'
+on:
+  workflow_dispatch: 
+  push:
+    branches:
+      - develop
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.event.pull_request.head.label || github.head_ref || github.ref }}'
+  cancel-in-progress: true
+permissions:
+  contents: write
+jobs:
+  cwt_scanning:
+    name: 'CWT Scanning'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          path: repo/
+          token: ${{ secrets.REPO_WRITE_ACCESS }}
+      
+      - name: Download CodeWeTrust
+        run: wget https://codewetrust-dist.s3-us-west-2.amazonaws.com/CodeWeTrustRunner_linux.tar.gz && tar -xzf CodeWeTrustRunner_linux.tar.gz 
+      - name: Show the directory structure
+        run: ls -R
+      
+      - name: Make CWT results directory
+        run: |
+          mkdir CodeWeTrustResults
+      - name: Run Code We Trust
+        run: |
+          ./CodeWeTrustRunner ./repo --ConnectionStrings:CodeWeTrustDB="server=${{ secrets.CWT_DB_SERVER }};uid=${{ secrets.CWT_UID }};pwd=${{ secrets.CWT_PWD }};database=${{ secrets.CWT_DB }};port=5432" --product-name NEO-WMS-WEB --PipelineSettings:LicenseKey ${{ secrets.CWT_LICENSE_KEY }} --PipelineSettings:WriteExecutiveReport true --PipelineSettings:OutPath ./CodeWeTrustResults
+
+      - name: Upload Result
+        uses: actions/upload-artifact@v3
+        with:
+          name: CodeWeTrust.pptx
+          path: ./CodeWeTrustResults/ExecutiveReport.pptx
+  build-deploy:
+    name: Build-Deploy on Dev
+    needs: cwt_scanning
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write    
+    environment:
+      name: 'Development'
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+      with:
+        ref: ${{ github.event.pull_request.head.ref }}
+        token: ${{ secrets.REPO_WRITE_ACCESS }}
+
+    - name: Use Node.js ${{ env.NODE_VERSION }}
+      uses: actions/setup-node@v1
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+    
+    - name: Adding Deployment date to config.json file
+      run: |
+        CURRENT_DATE=$(date +'%d/%m/%Y')
+        NEW_LINE='  "deploymentDate": "'$CURRENT_DATE'",'
+        sed -i '2i\\n'"$NEW_LINE"'' ./apps/wms/src/environments/dev/config.json
+        cat ./apps/wms/src/environments/dev/config.json
+
+    - name: npm install and build
+      run: |
+        npm install --global nx@latest --verbose
+        npm install -g @nrwl/cli --verbose
+        npm install --verbose
+
+    - name: Run lint
+      run: |
+        npm run lint --verbose
+
+    - name: Build
+      run: |
+        nx build wms --configuration=development --verbose
+    
+    - name: 'Deploy to Azure WebApp'
+      uses: azure/webapps-deploy@v2
+      with: 
+        app-name: ${{ env.AZURE_WEBAPP_NAME }}
+        publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
+      
+    - name: Show output
+      run: echo ${{ steps.deploy-to-webapp.outputs.webapp-url }}
+
+    - name: Tag develop branch
+      if: github.ref == 'refs/heads/develop'
+      run: |
+        version=$(node -e "console.log(require('./package.json').version)")
+        build_number=${GITHUB_RUN_NUMBER}
+        tag="develop/v${version}#${build_number}"
+        echo "$tag"
+        git tag $tag
+        git push origin $tag 
+
+    - name: Tag Release branch
+      if: github.ref == 'refs/heads/release'
+      run: |
+        version=$(node -e "console.log(require('./package.json').version)")
+        build_number=${GITHUB_RUN_NUMBER}
+        tag="release/v${version}#${build_number}"
+        echo "$tag"
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git tag -a $tag -m "Tagging $tag"
+        git push origin $tag
