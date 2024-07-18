@@ -1,0 +1,91 @@
+name: Unit testing
+env:
+  NODE_VERSION: '20.10.0'
+  AZURE_WEBAPP_PACKAGE_PATH: './dist/apps/wms'
+  LINE_COVERAGE_THRESHOLD: 60
+  BRANCH_COVERAGE_THRESHOLD: 40
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - develop
+
+concurrency:
+  group: "${{ github.workflow }} @ ${{ github.event.pull_request.head.label || github.head_ref || github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    environment:
+      name: "Development"
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+      with:
+        ref: ${{ github.event.pull_request.head.ref }}
+      
+    - name: Use Node.js ${{ env.NODE_VERSION }}
+      uses: actions/setup-node@v1
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+    - name: Set up .NET Core
+      uses: actions/setup-dotnet@v2
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        
+    - name: npm install
+      run: |
+        npm install --global nx@latest --verbose
+        npm install -g @nrwl/cli --verbose
+        npm install --verbose
+
+    - name: Run lint
+      run: |
+        npm run lint --verbose
+    - name: Unit Tests & Coverage
+      run: |
+        npm run test:wms:unit:coverage --verbose
+
+    - name: Run lint
+      run: |
+        npm run lint --verbose
+        
+    - name: ReportGenerator
+      uses: danielpalme/ReportGenerator-GitHub-Action@5.3.4
+      with:
+        reports: '**/lcov.info' # REQUIRED # The coverage reports that should be parsed (separated by semicolon). Globbing is supported.
+        targetdir: 'coverage'
+
+    - name: Upload coverage report artifact
+      uses: actions/upload-artifact@v2.2.3
+      with:
+        name: coverage
+        path: coverage
+        
+    - name: Verify coverage percentage
+      id: extract_coverage         
+      run: |
+        file="coverage/index.html"
+        line_coverage_lines=$(grep -zoP "<th>Line coverage:</th>\s*<td class=\"limit-width right\" title=\"[0-9]* of [0-9]*\">[0-9.]*%</td>" "$file")
+        line_percentage=$(echo "$line_coverage_lines" | sed -n 's/.*>\([0-9.]*\)%.*/\1/p')
+        LINE_COVERAGE=${line_percentage%.*}
+        branch_coverage_line=$(grep -zoP "<th>Branch coverage:</th>\s*<td class=\"limit-width right\" title=\"[0-9]* of [0-9]*\">[0-9.]*%</td>" "$file")
+        branch_percentage=$(echo "$branch_coverage_line" | sed -n 's/.*>\([0-9.]*\)%.*/\1/p')
+        BRANCH_COVERAGE=${branch_percentage%.*}
+        if [[ "$LINE_COVERAGE" -ge "$LINE_COVERAGE_THRESHOLD" && "$BRANCH_COVERAGE" -ge "$BRANCH_COVERAGE_THRESHOLD" ]]
+        then
+          echo "Line coverage: $LINE_COVERAGE; Minimum required: $LINE_COVERAGE_THRESHOLD"
+          echo "Branch coverage: $BRANCH_COVERAGE; Minimum required: $BRANCH_COVERAGE_THRESHOLD"
+          echo "Code Coverage threshold is met"
+        else
+          echo "Line coverage: $LINE_COVERAGE; Minimum required: $LINE_COVERAGE_THRESHOLD"
+          echo "Branch coverage: $BRANCH_COVERAGE; Minimum required: $BRANCH_COVERAGE_THRESHOLD"
+          echo "Code Coverage threshold is not met"
+          exit 1
+        fi
+        
+    # - name: Run integration tests
+    #   run: |
+    #     nx e2e wms --configuration=development --verbose
